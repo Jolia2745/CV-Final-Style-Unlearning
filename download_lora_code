@@ -1,0 +1,97 @@
+import pandas as pd
+import requests
+import torch
+import os
+from tqdm import tqdm
+from urllib.parse import urlparse
+os.environ['CURL_CA_BUNDLE'] = ''
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+output_csv = "./filtered_real_50.csv"
+lora_path = "./loras"
+API_KEY = 
+
+log_file = "./download_errors.log"
+
+def clean_up_folder(lora_path):
+    print("Checking and cleaning up unnecessary files in the folder...")
+    for file_name in os.listdir(lora_path):
+        if not file_name.endswith('.safetensors'):
+            file_path = os.path.join(lora_path, file_name)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+                print(f"Removed unnecessary file: {file_name}")
+
+with open(log_file, 'a') as log:
+    filtered_df = pd.read_csv(output_csv)
+    downloaded = False
+    download_info = filtered_df[['id', 'downloadUrl']]
+
+    # clean_up_folder(lora_path)
+
+    for index, row in download_info.iterrows():
+        model_id = row['id']
+        download_url = row['downloadUrl']
+
+        if isinstance(download_url, str):
+            if download_url.startswith('[') and download_url.endswith(']'):
+                urls = [url.strip().strip("'\"") for url in download_url.strip("[]").split(",")]
+            else:
+                urls = [download_url.strip()]
+        elif isinstance(download_url, list):
+            urls = download_url
+        else:
+            urls = [str(download_url)]
+
+        for url in urls:
+            url += '?token={API_KEY}'
+            if pd.notnull(url) and url.lower() != 'nan':
+                try:
+                    parsed_url = urlparse(url)
+                    file_name = os.path.basename(parsed_url.path)
+
+                    save_path = os.path.join(lora_path, file_name)
+                    print(f"Downloading '{file_name}' from {url}...")
+                    response = requests.get(url, stream=True, verify=False)
+
+                    if response.status_code == 200:
+                        content_disposition = response.headers.get('Content-Disposition', '')
+                        if content_disposition:
+                            print(f"Content-Disposition: {content_disposition}")
+                            log.write(f"[Content-Disposition] URL: {url}, Header: {content_disposition}\n")
+
+                            import re
+                            file_name_match = re.search(r'filename\*=UTF-8\'\'(.+)|filename="([^"]+)"|filename=(\S+)', content_disposition)
+                            if file_name_match:
+                                file_name = file_name_match.group(1) or file_name_match.group(2) or file_name_match.group(3)
+                                file_name = file_name.strip()
+
+                                save_path = os.path.join(lora_path, file_name)
+                                if os.path.exists(save_path):
+                                    print(f"File already exists: {save_path}")
+                                    continue
+
+                                total_size = int(response.headers.get('Content-Length', 0))
+                                block_size = 1024
+                                progress_bar = tqdm(total=total_size, unit='iB', unit_scale=True, desc=file_name)
+                                with open(save_path, 'wb') as f:
+                                    for chunk in response.iter_content(chunk_size=block_size):
+                                        if chunk:
+                                            f.write(chunk)
+                                            progress_bar.update(len(chunk))
+                                progress_bar.close()
+                                print(f"Downloaded and saved to '{save_path}'")
+                        else:
+                            print(f"Unhandled Content-Type '{content_type}' for URL {url}. Skipping download.")
+                            log.write(f"[Unhandled Content-Type] URL: {url}, Content-Type: {content_type}\n")
+                    else:
+                        print(f"Failed to download {url}. Status code: {response.status_code}")
+                        log.write(f"[HTTP Error] URL: {url}, Status Code: {response.status_code}, Response: {response.text}\n")
+
+                except requests.exceptions.SSLError as ssl_err:
+                    print(f"SSL Error while downloading {url}: {ssl_err}")
+                    log.write(f"[SSL Error] URL: {url}, Error: {ssl_err}\n")
+                except Exception as e:
+                    print(f"An error occurred while downloading {url}: {e}")
+                    log.write(f"[General Error] URL: {url}, Error: {e}\n")
